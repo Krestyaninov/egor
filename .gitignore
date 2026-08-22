@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.system_generated/
+*.log
+.DS_Store
+complete_sales_data.csv
+sales_margin_full.csv
+active_catalog_sections.csv
+all_deal_stages.json

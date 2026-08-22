@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  egor-bot:
+    build: .
+    container_name: egor-bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    environment:
+      - TZ=Europe/Moscow
