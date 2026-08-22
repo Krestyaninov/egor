@@ -1,9 +1,10 @@
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from config import TELEGRAM_BOT_TOKEN
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY_URL
 from handlers import router
 from b24_client import b24
 from analytics import get_now_msk, get_funnel_summary, get_categories_breakdown, get_pipeline_stuck_deals
@@ -80,7 +81,15 @@ async def main():
         logger.error("TELEGRAM_BOT_TOKEN is not set in .env!")
         return
 
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    # Инициализация с прокси при наличии
+    if TELEGRAM_PROXY_URL:
+        session = AiohttpSession(proxy=TELEGRAM_PROXY_URL)
+        bot = Bot(token=TELEGRAM_BOT_TOKEN, session=session)
+        logger.info(f"Telegram Bot initialized using proxy: {TELEGRAM_PROXY_URL.split('@')[-1]}")
+    else:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        logger.info("Telegram Bot initialized directly without proxy.")
+
     dp = Dispatcher()
     dp.include_router(router)
 

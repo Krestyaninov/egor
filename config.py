@@ -5,6 +5,7 @@ load_dotenv()
 
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL", "").rstrip("/") + "/"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "")
 CATALOG_IBLOCK_ID = int(os.getenv("CATALOG_IBLOCK_ID", "11"))
 
 # Полный маппинг стадий воронки CRM (с типами для сквозной аналитики маркетинга)
@@ -27,7 +28,7 @@ STAGE_MAP = {
     # 2. Успех (Выкуп)
     "WON": {"name": "Заказ выкуплен", "type": "WON"},
     
-    # 3. Нецелевые / Спам / Ошибки (Исключаются из квалифицированных)
+    # 3. Нецелевые / Спам / Дубли (Исключаются из квалифицированных)
     "APOLOGY": {"name": "Спам", "type": "JUNK"},
     "UC_Q7TYRN": {"name": "Внутренние Спам чаты", "type": "JUNK"},
     "UC_OL2S30": {"name": "Дубль заказа", "type": "JUNK"},
