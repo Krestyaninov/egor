@@ -7,6 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY_URL
 from handlers import router
+from auth import auth_manager
 from analytics import (
     get_now_msk,
     get_funnel_summary,
@@ -22,13 +23,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Хранилище chat_id подписчиков на утренний дайджест
-SUBSCRIBED_CHATS = set()
-
 async def send_morning_digest(bot: Bot):
-    """Утренний пульс CRM в 09:00 МСК: итоги вчера, зависший пайплайн >48ч и графики динамики за 7 дней"""
-    if not SUBSCRIBED_CHATS:
+    """Утренний пульс CRM в 09:00 МСК: отправка только авторизованным сотрудникам"""
+    target_chats = auth_manager.get_authorized_chat_ids()
+    if not target_chats:
+        logger.info("No authorized users for morning digest.")
         return
+
     now = get_now_msk()
     yesterday = now - timedelta(days=1)
     
@@ -55,7 +56,7 @@ async def send_morning_digest(bot: Bot):
     )
 
     photo_bytes = chart_buf.read()
-    for chat_id in SUBSCRIBED_CHATS:
+    for chat_id in target_chats:
         try:
             photo_file = BufferedInputFile(photo_bytes, filename="morning_digest.png")
             await bot.send_photo(chat_id, photo_file, caption=caption_digest, parse_mode="HTML")
@@ -78,12 +79,6 @@ async def main():
 
     dp = Dispatcher()
     dp.include_router(router)
-
-    @dp.message.outer_middleware()
-    async def track_chats_middleware(handler, event, data):
-        if event.chat and event.chat.id:
-            SUBSCRIBED_CHATS.add(event.chat.id)
-        return await handler(event, data)
 
     # Настройка планировщика расписаний (только утренний дайджест в 09:00)
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")

@@ -1,9 +1,18 @@
 import logging
 import html
 from aiogram import Router, F
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
+from aiogram.filters import CommandStart, Command, CommandObject
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    BufferedInputFile
+)
 from datetime import timedelta
+from auth import auth_manager
 from analytics import (
     get_now_msk,
     get_funnel_summary,
@@ -14,28 +23,227 @@ from analytics import (
 logger = logging.getLogger(__name__)
 router = Router()
 
-def get_main_keyboard() -> ReplyKeyboardMarkup:
+def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     kb = [
         [KeyboardButton(text="📊 Сегодня (Пульс)"), KeyboardButton(text="🌅 Вчера (Итоги)")],
         [KeyboardButton(text="📈 Графики & Динамика"), KeyboardButton(text="🗓 Недельный отчет (7 дней)")],
         [KeyboardButton(text="⏳ Зависшие сделки (>48ч)"), KeyboardButton(text="🛑 Причины отказов")]
     ]
+    if auth_manager.is_admin(user_id):
+        kb.append([KeyboardButton(text="⚙️ Доступы & Сотрудники")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
+def get_admin_inline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Сгенерировать инвайт-пароль", callback_data="admin_gen_invite")],
+        [InlineKeyboardButton(text="👥 Список сотрудников", callback_data="admin_list_users")],
+        [InlineKeyboardButton(text="📋 Активные инвайты", callback_data="admin_list_invites")],
+        [InlineKeyboardButton(text="🗑 Отозвать доступ", callback_data="admin_revoke_menu")]
+    ])
+
+# --- Проверка доступа и обработка авторизации ---
+
 @router.message(CommandStart())
-async def cmd_start(message: Message):
-    welcome_text = (
-        "👋 <b>Привет! Я Аналитик Егор (@egor_quapmi_bot)</b> — твой AI-ассистент по CRM-аналитике и контролю воронки продаж.\n\n"
-        "🎯 <b>Доступные отчеты:</b>\n"
-        "• 📊 <b>Сегодня (Пульс):</b> Входящий поток, квалификация, выкуп и отказы день-в-день\n"
-        "• 🌅 <b>Вчера (Итоги):</b> Итоги прошедшего дня и конверсия в выкуп\n"
-        "• 📈 <b>Графики & Динамика:</b> 3 диаграммы по спросу, качеству трафика (цель 95%) и выручке WON\n"
-        "• 🗓 <b>Недельный отчет:</b> Сводка за полные 7 закрытых дней\n"
-        "• ⏳ <b>Зависшие сделки (>48ч):</b> Структура заказов без движения по статусам и суммам\n"
-        "• 🛑 <b>Причины отказов:</b> Рейтинг потерь выручки с понятными причинами\n\n"
-        "👇 Выбирай нужный срез в меню ниже:"
+async def cmd_start(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    user_name = message.from_user.username or ""
+    full_name = message.from_user.full_name or ""
+    
+    # 1. Проверяем, передан ли токен в /start <TOKEN>
+    args = command.args
+    if args:
+        token = args.strip().upper()
+        if auth_manager.use_invite_token(token, user_id, user_name, full_name):
+            welcome = (
+                f"✅ <b>Доступ успешно активирован!</b>\n\n"
+                f"Добро пожаловать в команду, {html.escape(full_name)}!\n"
+                f"Вам открыт доступ к корпоративной CRM-аналитике и воронке продаж.\n\n"
+                f"👇 Выбирайте нужный отчет в меню ниже:"
+            )
+            await message.answer(welcome, reply_markup=get_main_keyboard(user_id), parse_mode="HTML")
+            return
+        elif not auth_manager.is_authorized(user_id):
+            await message.answer("❌ <b>Неверный или уже использованный одноразовый пароль.</b>\nОбратитесь к администратору для получения нового приглашения.", parse_mode="HTML")
+            return
+
+    # 2. Если уже авторизован
+    if auth_manager.is_authorized(user_id):
+        role_label = "👑 Главный Администратор" if auth_manager.is_admin(user_id) else "👤 Авторизованный сотрудник"
+        welcome_text = (
+            f"👋 <b>Привет, {html.escape(full_name)}!</b>\n"
+            f"Статус: <i>{role_label}</i>\n\n"
+            f"🎯 <b>Доступные отчеты Аналитика Егора:</b>\n"
+            f"• 📊 <b>Сегодня (Пульс):</b> Входящий поток, квалификация, выкуп и отказы день-в-день\n"
+            f"• 🌅 <b>Вчера (Итоги):</b> Итоги прошедшего дня и конверсия в выкуп\n"
+            f"• 📈 <b>Графики & Динамика:</b> 3 диаграммы по спросу, качеству трафика (цель 95%) и выручке WON\n"
+            f"• 🗓 <b>Недельный отчет:</b> Сводка за полные 7 закрытых дней\n"
+            f"• ⏳ <b>Зависшие сделки (>48ч):</b> Структура заказов без движения по статусам и суммам\n"
+            f"• 🛑 <b>Причины отказов:</b> Рейтинг потерь выручки с понятными причинами\n\n"
+            f"👇 Выбирай нужный срез в меню:"
+        )
+        await message.answer(welcome_text, reply_markup=get_main_keyboard(user_id), parse_mode="HTML")
+    else:
+        # 3. Пользователь не авторизован
+        no_access_text = (
+            f"⛔️ <b>Доступ ограничен</b>\n\n"
+            f"Этот бот содержит закрытую коммерческую аналитику компании.\n\n"
+            f"🔑 <b>Для получения доступа:</b>\n"
+            f"Отправьте в ответное сообщение <b>одноразовый пароль-приглашение</b> (6 символов), который вам предоставил руководитель.\n\n"
+            f"🆔 <i>Ваш Telegram ID: <code>{user_id}</code></i>"
+        )
+        await message.answer(no_access_text, parse_mode="HTML")
+
+# --- Общий фильтр текстовых сообщений для неавторизованных пользователей ---
+
+@router.message(lambda msg: not auth_manager.is_authorized(msg.from_user.id))
+async def handle_unauthorized_message(message: Message):
+    text = (message.text or "").strip().upper()
+    user_id = message.from_user.id
+    user_name = message.from_user.username or ""
+    full_name = message.from_user.full_name or ""
+    
+    # Пробуем проверить введенный текст как одноразовый пароль
+    if len(text) == 6 and auth_manager.use_invite_token(text, user_id, user_name, full_name):
+        welcome = (
+            f"✅ <b>Пароль принят! Доступ успешно предоставлен.</b>\n\n"
+            f"Добро пожаловать, {html.escape(full_name)}!\n"
+            f"Вам открыт доступ ко всем отчетам CRM-аналитика.\n\n"
+            f"👇 Выбирайте отчет в меню ниже:"
+        )
+        await message.answer(welcome, reply_markup=get_main_keyboard(user_id), parse_mode="HTML")
+    else:
+        no_access_text = (
+            f"⛔️ <b>Неверный пароль или доступ закрыт</b>\n\n"
+            f"Введенный код не найден или уже был активирован.\n"
+            f"Пожалуйста, запросите одноразовый пароль у администратора.\n\n"
+            f"🆔 <i>Ваш Telegram ID: <code>{user_id}</code></i>"
+        )
+        await message.answer(no_access_text, parse_mode="HTML")
+
+# --- Административная панель и управление доступами ---
+
+@router.message(F.text == "⚙️ Доступы & Сотрудники")
+@router.message(Command("admin"))
+async def handle_admin_panel(message: Message):
+    user_id = message.from_user.id
+    if not auth_manager.is_admin(user_id):
+        await message.answer("⛔️ Эта функция доступна только главному администратору.")
+        return
+        
+    users = auth_manager.get_all_authorized_users()
+    invites = auth_manager.get_active_invites()
+    
+    text = (
+        f"⚙️ <b>Панель управления доступами</b>\n\n"
+        f"👥 Авторизованных сотрудников: <b>{len(users)}</b>\n"
+        f"🔑 Активных неиспользованных инвайтов: <b>{len(invites)}</b>\n\n"
+        f"Выберите действие ниже:"
     )
-    await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+    await message.answer(text, reply_markup=get_admin_inline_kb(), parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_gen_invite")
+async def cb_gen_invite(call: CallbackQuery):
+    if not auth_manager.is_admin(call.from_user.id):
+        await call.answer("Нет прав", show_alert=True)
+        return
+        
+    token = auth_manager.generate_invite_token(call.from_user.id)
+    bot_user = await call.bot.get_me()
+    invite_link = f"https://t.me/{bot_user.username}?start={token}"
+    
+    text = (
+        f"🔑 <b>Новый одноразовый пароль создан!</b>\n\n"
+        f"Код: <code>{token}</code>\n\n"
+        f"🔗 <b>Прямая ссылка для входа в 1 клик:</b>\n"
+        f"{invite_link}\n\n"
+        f"<i>Отправьте этот код или ссылку сотруднику. Пароль одноразовый: после первого входа он будет закреплен за сотрудником и сгорит для повторного использования.</i>"
+    )
+    await call.message.edit_text(text, reply_markup=get_admin_inline_kb(), parse_mode="HTML")
+    await call.answer("Пароль успешно сгенерирован!")
+
+@router.callback_query(F.data == "admin_list_users")
+async def cb_list_users(call: CallbackQuery):
+    if not auth_manager.is_admin(call.from_user.id):
+        await call.answer("Нет прав", show_alert=True)
+        return
+        
+    users = auth_manager.get_all_authorized_users()
+    text = f"👥 <b>Список авторизованных сотрудников ({len(users)} чел):</b>\n\n"
+    
+    for u in users.values():
+        role_ico = "👑" if u.get("role") == "admin" else "👤"
+        uname = f"(@{u['username']})" if u.get("username") else ""
+        text += f"{role_ico} <b>{html.escape(u.get('full_name', 'Сотрудник'))}</b> {uname}\n"
+        text += f"   ID: <code>{u['user_id']}</code> | Добавлен: {u.get('added_at', '—')}\n\n"
+        
+    await call.message.edit_text(text, reply_markup=get_admin_inline_kb(), parse_mode="HTML")
+    await call.answer()
+
+@router.callback_query(F.data == "admin_list_invites")
+async def cb_list_invites(call: CallbackQuery):
+    if not auth_manager.is_admin(call.from_user.id):
+        await call.answer("Нет прав", show_alert=True)
+        return
+        
+    invites = auth_manager.get_active_invites()
+    bot_user = await call.bot.get_me()
+    
+    if not invites:
+        text = "📋 <b>Нет активных неиспользованных инвайтов.</b>\nНажмите <i>«Сгенерировать инвайт-пароль»</i> для создания."
+    else:
+        text = f"📋 <b>Активные одноразовые пароли ({len(invites)} шт):</b>\n\n"
+        for inv in invites:
+            link = f"https://t.me/{bot_user.username}?start={inv['token']}"
+            text += f"• Код: <code>{inv['token']}</code> (создан {inv['created_at']})\n  {link}\n\n"
+            
+    await call.message.edit_text(text, reply_markup=get_admin_inline_kb(), parse_mode="HTML")
+    await call.answer()
+
+@router.callback_query(F.data == "admin_revoke_menu")
+async def cb_revoke_menu(call: CallbackQuery):
+    if not auth_manager.is_admin(call.from_user.id):
+        await call.answer("Нет прав", show_alert=True)
+        return
+        
+    users = auth_manager.get_all_authorized_users()
+    non_admins = [u for u in users.values() if u.get("role") != "admin"]
+    
+    if not non_admins:
+        await call.message.edit_text("👥 Нет сотрудников для удаления (кроме главного администратора).", reply_markup=get_admin_inline_kb())
+        await call.answer()
+        return
+        
+    kb_buttons = []
+    for u in non_admins:
+        name = u.get("full_name") or f"ID {u['user_id']}"
+        kb_buttons.append([InlineKeyboardButton(text=f"❌ Отозвать у {name[:20]}", callback_data=f"revoke_{u['user_id']}")])
+    kb_buttons.append([InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="admin_back")])
+    
+    await call.message.edit_text("Выберите сотрудника, доступ которого требуется аннулировать:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("revoke_"))
+async def cb_do_revoke(call: CallbackQuery):
+    if not auth_manager.is_admin(call.from_user.id):
+        await call.answer("Нет прав", show_alert=True)
+        return
+        
+    target_id = int(call.data.replace("revoke_", ""))
+    if auth_manager.revoke_user_access(target_id):
+        await call.answer(f"Доступ сотрудника {target_id} успешно отозван!", show_alert=True)
+    else:
+        await call.answer("Не удалось отозвать доступ", show_alert=True)
+        
+    await handle_admin_panel(call.message)
+
+@router.callback_query(F.data == "admin_back")
+async def cb_admin_back(call: CallbackQuery):
+    if not auth_manager.is_admin(call.from_user.id):
+        return
+    await handle_admin_panel(call.message)
+    await call.answer()
+
+# --- Аналитические отчеты для авторизованных пользователей ---
 
 @router.message(F.text == "📊 Сегодня (Пульс)")
 @router.message(Command("today"))

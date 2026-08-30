@@ -8,6 +8,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "")
 CATALOG_IBLOCK_ID = int(os.getenv("CATALOG_IBLOCK_ID", "11"))
 
+# Список Telegram ID главных администраторов (через запятую в .env)
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "78429883").split(",") if x.strip()]
+
 # Полный маппинг стадий воронки CRM (с типами для сквозной аналитики маркетинга)
 STAGE_MAP = {
     # 1. В работе (Промежуточный пайплайн)
