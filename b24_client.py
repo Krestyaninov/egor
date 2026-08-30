@@ -47,7 +47,34 @@ class BitrixClient:
             res = await self.call("crm.deal.list", {
                 "order": {"DATE_CREATE": "DESC"},
                 "filter": filter_dict,
-                "select": ["ID", "TITLE", "STAGE_ID", "OPPORTUNITY", "DATE_CREATE", "DATE_MODIFY", "ASSIGNED_BY_ID", "UTM_SOURCE", "UTM_CAMPAIGN"],
+                "select": ["ID", "TITLE", "STAGE_ID", "OPPORTUNITY", "DATE_CREATE", "DATE_MODIFY", "CLOSEDATE", "ASSIGNED_BY_ID", "UTM_SOURCE", "UTM_CAMPAIGN"],
+                "start": start
+            })
+            items = res.get("result", [])
+            if not items:
+                break
+            deals.extend(items)
+            if "next" in res:
+                start = res["next"]
+            else:
+                break
+        return deals
+
+    async def get_won_deals_by_date(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """Получение всех сделок, выведенных в статус WON за указанный период (по CLOSEDATE или DATE_MODIFY)"""
+        deals = []
+        start = 0
+        filter_dict = {
+            "STAGE_ID": "WON",
+            ">=CLOSEDATE": start_date,
+            "<=CLOSEDATE": end_date
+        }
+
+        while True:
+            res = await self.call("crm.deal.list", {
+                "order": {"CLOSEDATE": "DESC"},
+                "filter": filter_dict,
+                "select": ["ID", "TITLE", "STAGE_ID", "OPPORTUNITY", "DATE_CREATE", "DATE_MODIFY", "CLOSEDATE"],
                 "start": start
             })
             items = res.get("result", [])
