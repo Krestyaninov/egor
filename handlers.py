@@ -17,7 +17,12 @@ from analytics import (
     get_now_msk,
     get_funnel_summary,
     get_pipeline_stuck_summary,
-    get_7days_charts_and_stats
+    get_7days_charts_and_stats,
+    get_zero_deals_data,
+    generate_zero_deals_chart,
+    get_product_types_data,
+    generate_product_types_chart,
+    PRODUCT_CATEGORIES
 )
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,7 @@ def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     kb = [
         [KeyboardButton(text="📊 Сегодня (Пульс)"), KeyboardButton(text="🌅 Вчера (Итоги)")],
         [KeyboardButton(text="📈 Графики & Динамика"), KeyboardButton(text="🗓 Недельный отчет (7 дней)")],
+        [KeyboardButton(text="🏷 Продажи по товарам"), KeyboardButton(text="⭕️ Нулевые сделки")],
         [KeyboardButton(text="⏳ Зависшие сделки (>48ч)"), KeyboardButton(text="🛑 Причины отказов")]
     ]
     if auth_manager.is_admin(user_id):
@@ -77,6 +83,8 @@ async def cmd_start(message: Message, command: CommandObject):
             f"• 🌅 <b>Вчера (Итоги):</b> Итоги прошедшего дня и конверсия в выкуп\n"
             f"• 📈 <b>Графики & Динамика:</b> 3 диаграммы по спросу, качеству трафика (цель 95%) и выручке WON\n"
             f"• 🗓 <b>Недельный отчет:</b> Сводка за полные 7 закрытых дней\n"
+            f"• 🏷 <b>Продажи по товарам:</b> Воронка по типам (Apple vs Другие) за Вчера / Неделю / Месяц\n"
+            f"• ⭕️ <b>Нулевые сделки:</b> Анализ лидов с 0 ₽ по дням (7 дн) и неделям (5 нед) с графиком\n"
             f"• ⏳ <b>Зависшие сделки (>48ч):</b> Структура заказов без движения по статусам и суммам\n"
             f"• 🛑 <b>Причины отказов:</b> Рейтинг потерь выручки с понятными причинами\n\n"
             f"👇 Выбирай нужный срез в меню:"
@@ -408,3 +416,187 @@ async def handle_reasons(message: Message):
             text += f"• <b>{r_name}</b>\n   {stat['count']} сделок | <b>{stat['amount']:,.0f} ₽</b> ({share:.1f}% от потерь)\n"
         
     await wait_msg.edit_text(text, parse_mode="HTML")
+
+# =====================================================================
+# НОВЫЙ БЛОК: Нулевые сделки (кнопки, форматирование, графики)
+# =====================================================================
+
+def get_zero_deals_kb(current_mode: str) -> InlineKeyboardMarkup:
+    btn_7d_text = "• 📅 7 дней (по дням) •" if current_mode == "7days" else "📅 7 дней (по дням)"
+    btn_5w_text = "• 🗓 5 недель •" if current_mode == "5weeks" else "🗓 5 недель"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=btn_7d_text, callback_data="zero_mode_7days"),
+            InlineKeyboardButton(text=btn_5w_text, callback_data="zero_mode_5weeks")
+        ],
+        [
+            InlineKeyboardButton(text="📈 Показать график динамики", callback_data=f"zero_chart_{current_mode}")
+        ]
+    ])
+
+def format_zero_deals_text(data: Dict[str, Any]) -> str:
+    period_label = "7 полных дней (до вчера)" if data["mode"] == "7days" else "5 недель (до вчера)"
+    text = (
+        f"⭕️ <b>Анализ сделок с суммой 0 ₽ (без спама)</b>\n"
+        f"Период: <b>{period_label}</b> ({data['start_date']} – {data['end_date']})\n\n"
+        f"<i>Правило ведения CRM: менеджеры обязаны вносить товар и фиксировать сумму даже при отказе. Нулевые сделки — индикатор необработанных заказов или нарушений регламента.</i>\n\n"
+        f"📊 <b>Сводные показатели:</b>\n"
+        f"• Квалифицированных сделок: <b>{data['total_qual']} шт.</b>\n"
+        f"• Сделок с 0 ₽: <b>{data['total_zero']} шт.</b> (<b>{data['overall_rate']:.1f}%</b> от базы)\n"
+        f"• Исключено спама/дублей/нецелевых: <b>{data['total_junk']} шт.</b>\n\n"
+        f"📅 <b>Динамика среза:</b>\n"
+    )
+    for it in data["items"]:
+        text += f"• {it['label']}: <b>{it['zero']} шт.</b> с 0 ₽ из {it['qual']} квал. (<b>{it['rate']:.1f}%</b>)\n"
+        
+    return text
+
+@router.message(F.text == "⭕️ Нулевые сделки")
+@router.message(Command("zero"))
+async def handle_zero_deals(message: Message):
+    wait_msg = await message.answer("⏳ Анализирую сделки с 0 суммой за последние 7 дней...")
+    try:
+        data = await get_zero_deals_data(mode="7days")
+        text = format_zero_deals_text(data)
+        await wait_msg.edit_text(text, reply_markup=get_zero_deals_kb("7days"), parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error handling zero deals: {e}")
+        await wait_msg.edit_text(f"❌ Ошибка загрузки данных: {e}")
+
+@router.callback_query(F.data.startswith("zero_mode_"))
+async def cb_zero_mode(call: CallbackQuery):
+    mode = call.data.replace("zero_mode_", "")
+    await call.answer("Загружаю данные...")
+    try:
+        data = await get_zero_deals_data(mode=mode)
+        text = format_zero_deals_text(data)
+        await call.message.edit_text(text, reply_markup=get_zero_deals_kb(mode), parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error switching zero mode: {e}")
+        await call.message.edit_text(f"❌ Ошибка обновления: {e}")
+
+@router.callback_query(F.data.startswith("zero_chart_"))
+async def cb_zero_chart(call: CallbackQuery):
+    mode = call.data.replace("zero_chart_", "")
+    await call.answer("Генерирую диаграмму...")
+    try:
+        data = await get_zero_deals_data(mode=mode)
+        buf = generate_zero_deals_chart(data)
+        caption = (
+            f"📈 <b>График динамики нулевых сделок ({data['mode']})</b>\n\n"
+            f"• Всего квалифицированных: <b>{data['total_qual']} шт.</b>\n"
+            f"• Нулевых сделок: <b>{data['total_zero']} шт.</b> (<b>{data['overall_rate']:.1f}%</b>)\n\n"
+            f"<i>Столбцы (синие) — количество сделок с 0 ₽, линия (красная) — доля от квалифицированных.</i>"
+        )
+        photo_file = BufferedInputFile(buf.read(), filename="zero_deals_chart.png")
+        await call.message.answer_photo(photo_file, caption=caption, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error generating zero chart: {e}")
+        await call.message.answer(f"❌ Ошибка генерации графика: {e}")
+
+# =====================================================================
+# НОВЫЙ БЛОК: Аналитика по типам товаров (Apple vs Другие)
+# =====================================================================
+
+def get_product_types_kb(current_period: str) -> InlineKeyboardMarkup:
+    def mark(p: str, label: str) -> str:
+        return f"• {label} •" if current_period == p else label
+        
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=mark("yesterday", "🌅 Вчера"), callback_data="prod_p_yesterday"),
+            InlineKeyboardButton(text=mark("this_week", "🗓 Тек. нед"), callback_data="prod_p_this_week"),
+            InlineKeyboardButton(text=mark("prev_week", "📅 Прошлая нед"), callback_data="prod_p_prev_week")
+        ],
+        [
+            InlineKeyboardButton(text=mark("this_month", "📆 Тек. месяц"), callback_data="prod_p_this_month"),
+            InlineKeyboardButton(text=mark("prev_month", "🗂 Прошлый месяц"), callback_data="prod_p_prev_month")
+        ],
+        [
+            InlineKeyboardButton(text="📈 Показать график среза", callback_data=f"prod_chart_{current_period}")
+        ]
+    ])
+
+def format_product_types_text(data: Dict[str, Any]) -> str:
+    title = data["title"]
+    stats = data["stats"]
+    total_deals = data["total_deals"]
+    target_deals = data["total_target_deals"]
+    
+    text = (
+        f"🏷 <b>Воронка по типам товаров | {title}</b>\n"
+        f"<i>Группы: «Товары» и «Комплектующие» (квалифицированные лиды)</i>\n\n"
+        f"📥 Всего квал. заказов: <b>{total_deals} шт.</b> (из них с целевыми товарами: <b>{target_deals} шт.</b>)\n\n"
+    )
+    
+    CAT_ICONS = {
+        "Смартфоны": "📱",
+        "Планшеты": "📟",
+        "Ноутбуки": "💻",
+        "Смарт-часы": "⌚️",
+        "Наушники": "🎧",
+        "Другие товары": "📦"
+    }
+    
+    for cat in PRODUCT_CATEGORIES:
+        icon = CAT_ICONS.get(cat, "🔹")
+        text += f"{icon} <b>{cat}:</b>\n"
+        for brand in ["Apple", "Другие"]:
+            s = stats[cat][brand]
+            if s["deals"] > 0:
+                text += (
+                    f"   • {brand}: <b>{s['deals']} лид.</b> | "
+                    f"Выкуп: <b>{s['cr']:.1f}%</b> ({s['won']} шт) | "
+                    f"Ср. чек: <b>{s['avg_check']:,.0f} ₽</b> | "
+                    f"Сумма: <b>{s['amount']:,.0f} ₽</b>\n"
+                )
+            else:
+                text += f"   • {brand}: <i>нет лидов</i>\n"
+        text += "\n"
+        
+    return text
+
+@router.message(F.text == "🏷 Продажи по товарам")
+@router.message(Command("products"))
+async def handle_product_types(message: Message):
+    wait_msg = await message.answer("⏳ Собираю продажи по товарным группам за вчера...")
+    try:
+        data = await get_product_types_data(period="yesterday")
+        text = format_product_types_text(data)
+        await wait_msg.edit_text(text, reply_markup=get_product_types_kb("yesterday"), parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error handling product types: {e}")
+        await wait_msg.edit_text(f"❌ Ошибка выгрузки: {e}")
+
+@router.callback_query(F.data.startswith("prod_p_"))
+async def cb_product_period(call: CallbackQuery):
+    period = call.data.replace("prod_p_", "")
+    await call.answer("Загружаю срез...")
+    try:
+        data = await get_product_types_data(period=period)
+        text = format_product_types_text(data)
+        await call.message.edit_text(text, reply_markup=get_product_types_kb(period), parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error switching product period: {e}")
+        await call.message.edit_text(f"❌ Ошибка обновления: {e}")
+
+@router.callback_query(F.data.startswith("prod_chart_"))
+async def cb_product_chart(call: CallbackQuery):
+    period = call.data.replace("prod_chart_", "")
+    await call.answer("Генерирую диаграмму...")
+    try:
+        data = await get_product_types_data(period=period)
+        buf = generate_product_types_chart(data)
+        caption = (
+            f"📈 <b>Аналитика по типам товаров (Apple vs Другие)</b>\n"
+            f"Период: <b>{data['title']}</b>\n\n"
+            f"1️⃣ <b>Лиды:</b> Сравнение объема входящего спроса\n"
+            f"2️⃣ <b>Конверсия:</b> Процент выкупа (% WON от квал. сделок)\n"
+            f"3️⃣ <b>Средний чек:</b> Средняя сумма позиций товара в сделке"
+        )
+        photo_file = BufferedInputFile(buf.read(), filename="product_types_chart.png")
+        await call.message.answer_photo(photo_file, caption=caption, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error generating product chart: {e}")
+        await call.message.answer(f"❌ Ошибка создания графика: {e}")
+

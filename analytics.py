@@ -291,3 +291,464 @@ async def get_7days_charts_and_stats() -> Tuple[io.BytesIO, Dict[str, Any]]:
     }
 
     return buf, summary_stats
+
+# =====================================================================
+# НОВЫЙ БЛОК: Анализ нулевых сделок (без спама)
+# =====================================================================
+
+import numpy as np
+
+async def get_zero_deals_data(mode: str = "7days") -> Dict[str, Any]:
+    now = get_now_msk()
+    yesterday = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    if mode == "7days":
+        start_dt = yesterday - timedelta(days=6)
+        end_dt = yesterday
+        title = "Динамика нулевых сделок (7 дней до вчера)"
+        days = [(start_dt + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+        labels = [(start_dt + timedelta(days=i)).strftime("%d.%m") for i in range(7)]
+        
+        deals = await b24.get_deals_by_date(
+            start_dt.strftime("%Y-%m-%dT00:00:00+03:00"),
+            end_dt.strftime("%Y-%m-%dT23:59:59+03:00")
+        )
+        
+        intervals_stat = {d: {"total": 0, "junk": 0, "qual": 0, "zero": 0} for d in days}
+        for d in deals:
+            d_str = (d.get("DATE_CREATE") or "")[:10]
+            if d_str in intervals_stat:
+                intervals_stat[d_str]["total"] += 1
+                st_type = STAGE_MAP.get(d.get("STAGE_ID"), {}).get("type")
+                if st_type == "JUNK":
+                    intervals_stat[d_str]["junk"] += 1
+                else:
+                    intervals_stat[d_str]["qual"] += 1
+                    opp = float(d.get("OPPORTUNITY") or 0)
+                    if opp == 0:
+                        intervals_stat[d_str]["zero"] += 1
+                        
+        items = []
+        for d, lbl in zip(days, labels):
+            s = intervals_stat[d]
+            rate = (s["zero"] / s["qual"] * 100) if s["qual"] > 0 else 0.0
+            items.append({
+                "key": d,
+                "label": lbl,
+                "total": s["total"],
+                "qual": s["qual"],
+                "junk": s["junk"],
+                "zero": s["zero"],
+                "rate": rate
+            })
+    else: # 5weeks
+        end_dt = yesterday
+        mon_this_week = yesterday - timedelta(days=yesterday.weekday())
+        start_dt = mon_this_week - timedelta(weeks=4)
+        title = "Динамика нулевых сделок (5 недель до вчера)"
+        
+        deals = await b24.get_deals_by_date(
+            start_dt.strftime("%Y-%m-%dT00:00:00+03:00"),
+            end_dt.strftime("%Y-%m-%dT23:59:59+03:00")
+        )
+        
+        weeks = []
+        for w in range(5):
+            w_start = start_dt + timedelta(weeks=w)
+            w_end = min(w_start + timedelta(days=6), end_dt)
+            w_label = f"{w_start.strftime('%d.%m')}–{w_end.strftime('%d.%m')}"
+            weeks.append({
+                "start": w_start,
+                "end": w_end,
+                "label": w_label,
+                "total": 0,
+                "junk": 0,
+                "qual": 0,
+                "zero": 0
+            })
+            
+        for d in deals:
+            try:
+                dt = datetime.fromisoformat(d["DATE_CREATE"].replace("Z", "+00:00"))
+                for wb in weeks:
+                    w_start_msk = wb["start"].replace(tzinfo=MSK_TZ, hour=0, minute=0, second=0)
+                    w_end_msk = wb["end"].replace(tzinfo=MSK_TZ, hour=23, minute=59, second=59)
+                    if w_start_msk <= dt <= w_end_msk:
+                        wb["total"] += 1
+                        st_type = STAGE_MAP.get(d.get("STAGE_ID"), {}).get("type")
+                        if st_type == "JUNK":
+                            wb["junk"] += 1
+                        else:
+                            wb["qual"] += 1
+                            opp = float(d.get("OPPORTUNITY") or 0)
+                            if opp == 0:
+                                wb["zero"] += 1
+                        break
+            except:
+                pass
+                
+        items = []
+        for wb in weeks:
+            rate = (wb["zero"] / wb["qual"] * 100) if wb["qual"] > 0 else 0.0
+            items.append({
+                "label": wb["label"],
+                "total": wb["total"],
+                "qual": wb["qual"],
+                "junk": wb["junk"],
+                "zero": wb["zero"],
+                "rate": rate
+            })
+            
+    total_qual = sum(x["qual"] for x in items)
+    total_zero = sum(x["zero"] for x in items)
+    total_junk = sum(x.get("junk", 0) for x in items)
+    overall_rate = (total_zero / total_qual * 100) if total_qual > 0 else 0.0
+    
+    return {
+        "mode": mode,
+        "title": title,
+        "start_date": start_dt.strftime("%d.%m.%Y"),
+        "end_date": end_dt.strftime("%d.%m.%Y"),
+        "items": items,
+        "total_qual": total_qual,
+        "total_zero": total_zero,
+        "total_junk": total_junk,
+        "overall_rate": overall_rate
+    }
+
+def generate_zero_deals_chart(data: Dict[str, Any]) -> io.BytesIO:
+    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
+    fig, ax1 = plt.subplots(figsize=(9.5, 5.2), dpi=160)
+    fig.patch.set_facecolor('#F8F9FA')
+    ax1.set_facecolor('#FFFFFF')
+
+    labels = [x["label"] for x in data["items"]]
+    zero_counts = [x["zero"] for x in data["items"]]
+    rates = [x["rate"] for x in data["items"]]
+    
+    x = np.arange(len(labels))
+    width = 0.45
+
+    # Левая ось: количество нулевых сделок (шт)
+    c_bar = '#3B82F6'
+    c_edge = '#1D4ED8'
+    bars = ax1.bar(x, zero_counts, width=width, color=c_bar, edgecolor=c_edge, linewidth=1.2, zorder=3, label="Нулевые сделки (шт)")
+    ax1.set_ylabel("Количество нулевых сделок (шт)", fontsize=10, fontweight="bold", color="#1E3A8A")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels, fontsize=10, fontweight="bold")
+    ax1.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
+    
+    max_count = max(zero_counts) if zero_counts else 10
+    ax1.set_ylim(0, max_count * 1.35 + 2)
+
+    for bar in bars:
+        h = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2, h + (max_count * 0.02) + 0.3, f"{int(h)} шт", ha='center', va='bottom', fontsize=9.5, fontweight='bold', color="#1E3A8A")
+
+    # Правая ось: доля от квалифицированных (%)
+    ax2 = ax1.twinx()
+    c_line = '#DC2626'
+    line = ax2.plot(x, rates, color=c_line, marker='o', linewidth=2.5, markersize=7, zorder=5, label="% от квал. сделок")
+    ax2.set_ylabel("Доля от квал. сделок (%)", fontsize=10, fontweight="bold", color=c_line)
+    
+    max_rate = max(rates) if rates else 50
+    ax2.set_ylim(0, max(max_rate * 1.3, 20))
+    ax2.grid(False)
+
+    for i, r in enumerate(rates):
+        ax2.text(x[i], r + (max_rate * 0.03) + 1.0, f"{r:.1f}%", ha='center', va='bottom', fontsize=9.5, fontweight='bold', color='#991B1B')
+
+    title_text = f"{data['title']}\nИтого: {data['total_zero']} из {data['total_qual']} квал. сделок ({data['overall_rate']:.1f}%)"
+    ax1.set_title(title_text, fontsize=11.5, fontweight='bold', pad=12, color='#0F172A')
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=9)
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=160, facecolor=fig.get_facecolor(), edgecolor='none')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+# =====================================================================
+# НОВЫЙ БЛОК: Анализ продаж по товарным группам (Apple vs Другие)
+# =====================================================================
+
+PRODUCT_CATEGORIES = ["Смартфоны", "Планшеты", "Ноутбуки", "Смарт-часы", "Наушники", "Другие товары"]
+_PRODUCT_META_CACHE: Dict[int, Dict[str, Any]] = {}
+
+def map_product_category(type_prefix: str, product_name: str) -> str:
+    tp = (type_prefix or "").strip().lower()
+    nm = (product_name or "").lower()
+    if "смартфон" in tp or "смартфон" in nm:
+        return "Смартфоны"
+    elif "планшет" in tp or "ipad" in nm:
+        return "Планшеты"
+    elif "ноутбук" in tp or "macbook" in nm or "ноутбук" in nm:
+        return "Ноутбуки"
+    elif "смарт-час" in tp or "часы" in tp or "apple watch" in nm:
+        return "Смарт-часы"
+    elif "наушник" in tp or "гарнитур" in tp or "airpods" in nm or "наушники" in nm:
+        return "Наушники"
+    return "Другие товары"
+
+def is_apple_product(meta: Dict[str, Any]) -> bool:
+    p75 = meta.get("p75")
+    p75_val = p75.get("value") if isinstance(p75, dict) else p75
+    if str(p75_val) == "2150":
+        return True
+    nm = (meta.get("name") or "").lower()
+    return any(k in nm for k in ["apple", "iphone", "ipad", "macbook", "airpods", "apple watch", "imac", "mac mini", "mac studio"])
+
+async def get_products_meta_batch(product_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    missing = [pid for pid in product_ids if pid not in _PRODUCT_META_CACHE and pid > 0]
+    chunk_size = 50
+    for i in range(0, len(missing), chunk_size):
+        chunk = missing[i:i+chunk_size]
+        cmd = {f"p_{pid}": f"crm.product.get?id={pid}" for pid in chunk}
+        batch_res = await b24.call("batch", {"cmd": cmd})
+        res_data = batch_res.get("result", {}).get("result", {})
+        for pid_key, p_res in res_data.items():
+            try:
+                pid = int(pid_key.replace("p_", ""))
+                ptg = p_res.get("PROPERTY_60570")
+                tp = p_res.get("PROPERTY_60389")
+                p75 = p_res.get("PROPERTY_75")
+                ptg_val = ptg.get("value") if isinstance(ptg, dict) else ptg
+                tp_val = tp.get("value") if isinstance(tp, dict) else tp
+                _PRODUCT_META_CACHE[pid] = {
+                    "name": p_res.get("NAME") or "",
+                    "group": ptg_val or "",
+                    "type": tp_val or "",
+                    "p75": p75
+                }
+            except Exception:
+                pass
+    return _PRODUCT_META_CACHE
+
+async def get_deals_productrows_batch(deal_ids: List[int]) -> Dict[str, List[Dict[str, Any]]]:
+    deal_products: Dict[str, List[Dict[str, Any]]] = {}
+    chunk_size = 50
+    for i in range(0, len(deal_ids), chunk_size):
+        chunk = deal_ids[i:i+chunk_size]
+        cmd = {f"d_{did}": f"crm.deal.productrows.get?id={did}" for did in chunk}
+        batch_res = await b24.call("batch", {"cmd": cmd})
+        res_data = batch_res.get("result", {}).get("result", {})
+        for did_key, rows in res_data.items():
+            did = did_key.replace("d_", "")
+            deal_products[did] = rows or []
+    return deal_products
+
+def get_period_dates(period: str) -> Tuple[datetime, datetime, str]:
+    now = get_now_msk()
+    yesterday = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    if period == "yesterday":
+        start_dt = yesterday
+        end_dt = yesterday
+        title = f"Вчера ({yesterday.strftime('%d.%m.%Y')})"
+    elif period == "this_week":
+        start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+        if start_dt > yesterday:
+            start_dt = yesterday
+        end_dt = yesterday
+        title = f"Текущая неделя ({start_dt.strftime('%d.%m')} – {yesterday.strftime('%d.%m.%Y')})"
+    elif period == "prev_week":
+        mon_this_week = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+        start_dt = mon_this_week - timedelta(days=7)
+        end_dt = mon_this_week - timedelta(days=1)
+        title = f"Прошлая неделя ({start_dt.strftime('%d.%m')} – {end_dt.strftime('%d.%m.%Y')})"
+    elif period == "this_month":
+        start_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if start_dt > yesterday:
+            start_dt = yesterday
+        end_dt = yesterday
+        title = f"Текущий месяц ({start_dt.strftime('%d.%m')} – {yesterday.strftime('%d.%m.%Y')})"
+    elif period == "prev_month":
+        first_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end_dt = first_this_month - timedelta(days=1)
+        start_dt = end_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        title = f"Прошлый месяц ({start_dt.strftime('%d.%m')} – {end_dt.strftime('%d.%m.%Y')})"
+    else:
+        start_dt = yesterday
+        end_dt = yesterday
+        title = f"Вчера ({yesterday.strftime('%d.%m.%Y')})"
+        
+    return start_dt, end_dt, title
+
+async def get_product_types_data(period: str = "yesterday") -> Dict[str, Any]:
+    start_dt, end_dt, title = get_period_dates(period)
+    
+    start_str = start_dt.strftime("%Y-%m-%dT00:00:00+03:00")
+    end_str = end_dt.strftime("%Y-%m-%dT23:59:59+03:00")
+    
+    deals = await b24.get_deals_by_date(start_str, end_str)
+    
+    # Исключаем спам/дубли/нецелевые
+    qual_deals = [d for d in deals if STAGE_MAP.get(d.get("STAGE_ID"), {}).get("type") != "JUNK"]
+    deal_ids = [int(d["ID"]) for d in qual_deals]
+    
+    deal_products = await get_deals_productrows_batch(deal_ids)
+    
+    # Собираем уникальные ID продуктов
+    all_pids = set()
+    for rows in deal_products.values():
+        for r in rows:
+            pid = r.get("PRODUCT_ID")
+            if pid and int(pid) > 0:
+                all_pids.add(int(pid))
+                
+    prod_meta = await get_products_meta_batch(list(all_pids))
+    
+    # Инициализируем структуру статистики
+    stats = {}
+    for cat in PRODUCT_CATEGORIES:
+        stats[cat] = {
+            "Apple": {"deals": 0, "won": 0, "amount": 0.0, "cr": 0.0, "avg_check": 0.0},
+            "Другие": {"deals": 0, "won": 0, "amount": 0.0, "cr": 0.0, "avg_check": 0.0}
+        }
+        
+    target_deals_count = 0
+    
+    for d in qual_deals:
+        did = str(d["ID"])
+        rows = deal_products.get(did, [])
+        is_won = (STAGE_MAP.get(d.get("STAGE_ID"), {}).get("type") == "WON")
+        
+        deal_cat_amounts = {}
+        has_target = False
+        
+        for r in rows:
+            pid = r.get("PRODUCT_ID")
+            if not pid or int(pid) not in prod_meta:
+                continue
+            meta = prod_meta[int(pid)]
+            if meta["group"] not in ["Товары", "Комплектующие"]:
+                continue
+            has_target = True
+            cat = map_product_category(meta["type"], meta["name"])
+            brand = "Apple" if is_apple_product(meta) else "Другие"
+            price = float(r.get("PRICE") or 0) * float(r.get("QUANTITY") or 1)
+            key = (cat, brand)
+            deal_cat_amounts[key] = deal_cat_amounts.get(key, 0.0) + price
+            
+        if has_target:
+            target_deals_count += 1
+            
+        for (cat, brand), amt in deal_cat_amounts.items():
+            sub = stats[cat][brand]
+            sub["deals"] += 1
+            if is_won:
+                sub["won"] += 1
+            sub["amount"] += amt
+            
+    # Вычисляем производные метрики (CR и средний чек)
+    for cat in PRODUCT_CATEGORIES:
+        for brand in ["Apple", "Другие"]:
+            s = stats[cat][brand]
+            s["cr"] = (s["won"] / s["deals"] * 100) if s["deals"] > 0 else 0.0
+            s["avg_check"] = (s["amount"] / s["deals"]) if s["deals"] > 0 else 0.0
+            
+    return {
+        "period": period,
+        "title": title,
+        "start_date": start_dt.strftime("%d.%m.%Y"),
+        "end_date": end_dt.strftime("%d.%m.%Y"),
+        "total_deals": len(qual_deals),
+        "total_target_deals": target_deals_count,
+        "stats": stats
+    }
+
+def generate_product_types_chart(data: Dict[str, Any]) -> io.BytesIO:
+    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 11), dpi=160)
+    fig.patch.set_facecolor('#F8F9FA')
+
+    stats = data["stats"]
+    title = data["title"]
+
+    c_apple = '#2563EB'
+    c_other = '#F59E0B'
+    c_dark = '#0F172A'
+
+    x = np.arange(len(PRODUCT_CATEGORIES))
+    width = 0.36
+
+    apple_deals = [stats[c]["Apple"]["deals"] for c in PRODUCT_CATEGORIES]
+    other_deals = [stats[c]["Другие"]["deals"] for c in PRODUCT_CATEGORIES]
+
+    apple_cr = [stats[c]["Apple"]["cr"] for c in PRODUCT_CATEGORIES]
+    other_cr = [stats[c]["Другие"]["cr"] for c in PRODUCT_CATEGORIES]
+
+    apple_chk = [stats[c]["Apple"]["avg_check"] / 1000 for c in PRODUCT_CATEGORIES]
+    other_chk = [stats[c]["Другие"]["avg_check"] / 1000 for c in PRODUCT_CATEGORIES]
+
+    # 1. Лиды
+    ax1.set_facecolor('#FFFFFF')
+    b1 = ax1.bar(x - width/2, apple_deals, width, label='Apple', color=c_apple, edgecolor='#1D4ED8', zorder=3)
+    b2 = ax1.bar(x + width/2, other_deals, width, label='Другие бренды', color=c_other, edgecolor='#D97706', zorder=3)
+    ax1.set_title(f'1. Количество входящих лидов (сделок) | {title}', fontsize=11, fontweight='bold', pad=8, color=c_dark)
+    ax1.set_ylabel('Сделок (шт)', fontsize=9, fontweight='bold', color=c_dark)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(PRODUCT_CATEGORIES, fontsize=9.5, fontweight='bold')
+    ax1.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
+    max_d = max(max(apple_deals or [0]), max(other_deals or [0]), 5)
+    ax1.set_ylim(0, max_d * 1.35 + 1)
+    ax1.legend(loc='upper right', frameon=True, facecolor='#FFFFFF', edgecolor='#CBD5E1', fontsize=9)
+    for bar in b1:
+        h = bar.get_height()
+        if h > 0:
+            ax1.text(bar.get_x() + bar.get_width()/2, h + 0.3, f"{int(h)}", ha='center', va='bottom', fontsize=9, fontweight='bold', color='#1E3A8A')
+    for bar in b2:
+        h = bar.get_height()
+        if h > 0:
+            ax1.text(bar.get_x() + bar.get_width()/2, h + 0.3, f"{int(h)}", ha='center', va='bottom', fontsize=9, fontweight='bold', color='#92400E')
+
+    # 2. Конверсия выкупа (%)
+    ax2.set_facecolor('#FFFFFF')
+    b3 = ax2.bar(x - width/2, apple_cr, width, label='Apple', color='#3B82F6', edgecolor='#1D4ED8', zorder=3)
+    b4 = ax2.bar(x + width/2, other_cr, width, label='Другие бренды', color='#FBBF24', edgecolor='#D97706', zorder=3)
+    ax2.set_title('2. Процент выкупа (CR в статус WON от квал. сделок)', fontsize=11, fontweight='bold', pad=8, color=c_dark)
+    ax2.set_ylabel('Выкуп (%)', fontsize=9, fontweight='bold', color=c_dark)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(PRODUCT_CATEGORIES, fontsize=9.5, fontweight='bold')
+    ax2.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
+    ax2.set_ylim(0, 115)
+    for bar in b3:
+        h = bar.get_height()
+        if h > 0:
+            ax2.text(bar.get_x() + bar.get_width()/2, h + 1.5, f"{h:.0f}%", ha='center', va='bottom', fontsize=8.5, fontweight='bold', color='#1E3A8A')
+    for bar in b4:
+        h = bar.get_height()
+        if h > 0:
+            ax2.text(bar.get_x() + bar.get_width()/2, h + 1.5, f"{h:.0f}%", ha='center', va='bottom', fontsize=8.5, fontweight='bold', color='#92400E')
+
+    # 3. Средний чек (тыс. руб)
+    ax3.set_facecolor('#FFFFFF')
+    b5 = ax3.bar(x - width/2, apple_chk, width, label='Apple', color='#10B981', edgecolor='#047857', zorder=3)
+    b6 = ax3.bar(x + width/2, other_chk, width, label='Другие бренды', color='#6EE7B7', edgecolor='#059669', zorder=3)
+    ax3.set_title('3. Средний чек товарной позиции (тыс. руб)', fontsize=11, fontweight='bold', pad=8, color=c_dark)
+    ax3.set_ylabel('Ср. чек (тыс. руб)', fontsize=9, fontweight='bold', color=c_dark)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(PRODUCT_CATEGORIES, fontsize=9.5, fontweight='bold')
+    ax3.grid(axis='y', linestyle='--', alpha=0.5, zorder=0)
+    max_c = max(max(apple_chk or [0]), max(other_chk or [0]), 20)
+    ax3.set_ylim(0, max_c * 1.35 + 5)
+    for bar in b5:
+        h = bar.get_height()
+        if h > 0:
+            ax3.text(bar.get_x() + bar.get_width()/2, h + (max_c * 0.02) + 0.5, f"{h:,.0f}k", ha='center', va='bottom', fontsize=8.5, fontweight='bold', color='#065F46')
+    for bar in b6:
+        h = bar.get_height()
+        if h > 0:
+            ax3.text(bar.get_x() + bar.get_width()/2, h + (max_c * 0.02) + 0.5, f"{h:,.0f}k", ha='center', va='bottom', fontsize=8.5, fontweight='bold', color='#065F46')
+
+    plt.tight_layout(pad=2.0)
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=160, facecolor=fig.get_facecolor(), edgecolor='none')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
